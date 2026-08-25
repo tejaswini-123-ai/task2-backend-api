@@ -1,9 +1,13 @@
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, status, HTTPException
+from fastapi import FastAPI, status, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from sqlalchemy.orm import Session
+
+from app.database import SessionLocal, engine, Base
+from app import models
 
 from app.schemas import (
     UserCreate,
@@ -14,22 +18,56 @@ from app.schemas import (
     TaskUpdate
 )
 
+
+# =========================================================
+# ENVIRONMENT VARIABLES
+# =========================================================
+
 load_dotenv()
 
 APP_NAME = os.getenv("APP_NAME")
 APP_VERSION = os.getenv("APP_VERSION")
 
+
+# =========================================================
+# CREATE DATABASE TABLES
+# =========================================================
+
+Base.metadata.create_all(bind=engine)
+
+
+# =========================================================
+# DATABASE SESSION
+# =========================================================
+
+def get_db():
+    db = SessionLocal()
+
+    try:
+        yield db
+
+    finally:
+        db.close()
+
+
+# =========================================================
+# FASTAPI APP
+# =========================================================
+
 app = FastAPI(
     title="Users, Projects & Tasks API",
     description="REST API for managing users, projects, and tasks",
-    version="1.0.0"
+    version=APP_VERSION or "1.0.0"
 )
+
+
 # =========================================================
 # CENTRALIZED ERROR HANDLING
 # =========================================================
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
+
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -41,8 +79,9 @@ async def http_exception_handler(request, exc):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
+
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content={
             "success": False,
             "error": "Validation error",
@@ -52,30 +91,15 @@ async def validation_exception_handler(request, exc):
 
 
 # =========================================================
-# TEMPORARY STORAGE
-# =========================================================
-
-users = []
-projects = []
-tasks = []
-
-
-# =========================================================
-# ID COUNTERS
-# =========================================================
-
-user_id_counter = 1
-project_id_counter = 1
-task_id_counter = 1
-
-
-# =========================================================
 # HOME
 # =========================================================
 
 @app.get("/")
 def home():
-    return "Users, Projects & Tasks API is running"
+
+    return {
+        "message": f"{APP_NAME or 'Users, Projects & Tasks API'} is running"
+    }
 
 
 # =========================================================
@@ -84,27 +108,36 @@ def home():
 
 # CREATE USER
 @app.post("/users", status_code=status.HTTP_201_CREATED)
-def create_user(user: UserCreate):
-    global user_id_counter
+def create_user(
+    user: UserCreate,
+    db: Session = Depends(get_db)
+):
 
-    new_user = {
-        "id": user_id_counter,
-        "name": user.name,
-        "email": user.email
-    }
+    new_user = models.User(
+        name=user.name,
+        email=user.email
+    )
 
-    users.append(new_user)
-    user_id_counter += 1
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
 
     return {
         "message": "User created successfully",
-        "user": new_user
+        "user": {
+            "id": new_user.id,
+            "name": new_user.name,
+            "email": new_user.email
+        }
     }
 
 
 # GET ALL USERS
 @app.get("/users")
-def get_users():
+def get_users(db: Session = Depends(get_db)):
+
+    users = db.query(models.User).all()
+
     return {
         "message": "Users retrieved successfully",
         "users": users
@@ -113,60 +146,80 @@ def get_users():
 
 # GET USER BY ID
 @app.get("/users/{user_id}")
-def get_user(user_id: int):
+def get_user(
+    user_id: int,
+    db: Session = Depends(get_db)
+):
 
-    for user in users:
-        if user["id"] == user_id:
-            return {
-                "message": "User retrieved successfully",
-                "user": user
-            }
+    user = db.query(models.User).filter(
+        models.User.id == user_id
+    ).first()
 
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="User not found"
-    )
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    return {
+        "message": "User retrieved successfully",
+        "user": user
+    }
 
 
 # UPDATE USER
 @app.put("/users/{user_id}")
-def update_user(user_id: int, user: UserUpdate):
+def update_user(
+    user_id: int,
+    user: UserUpdate,
+    db: Session = Depends(get_db)
+):
 
-    for existing_user in users:
-        if existing_user["id"] == user_id:
+    existing_user = db.query(models.User).filter(
+        models.User.id == user_id
+    ).first()
 
-            existing_user["name"] = user.name
-            existing_user["email"] = user.email
+    if not existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
 
-            return {
-                "message": "User updated successfully",
-                "user": existing_user
-            }
+    existing_user.name = user.name
+    existing_user.email = user.email
 
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="User not found"
-    )
+    db.commit()
+    db.refresh(existing_user)
+
+    return {
+        "message": "User updated successfully",
+        "user": existing_user
+    }
 
 
 # DELETE USER
 @app.delete("/users/{user_id}")
-def delete_user(user_id: int):
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db)
+):
 
-    for user in users:
-        if user["id"] == user_id:
+    user = db.query(models.User).filter(
+        models.User.id == user_id
+    ).first()
 
-            users.remove(user)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
 
-            return {
-                "message": "User deleted successfully",
-                "user": user
-            }
+    db.delete(user)
+    db.commit()
 
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="User not found"
-    )
+    return {
+        "message": "User deleted successfully"
+    }
 
 
 # =========================================================
@@ -175,32 +228,30 @@ def delete_user(user_id: int):
 
 # CREATE PROJECT
 @app.post("/projects", status_code=status.HTTP_201_CREATED)
-def create_project(project: ProjectCreate):
-    global project_id_counter
+def create_project(
+    project: ProjectCreate,
+    db: Session = Depends(get_db)
+):
 
-    # Check if user exists
-    user_exists = False
+    user = db.query(models.User).filter(
+        models.User.id == project.user_id
+    ).first()
 
-    for user in users:
-        if user["id"] == project.user_id:
-            user_exists = True
-            break
-
-    if not user_exists:
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
 
-    new_project = {
-        "id": project_id_counter,
-        "name": project.name,
-        "description": project.description,
-        "user_id": project.user_id
-    }
+    new_project = models.Project(
+        name=project.name,
+        description=project.description,
+        user_id=project.user_id
+    )
 
-    projects.append(new_project)
-    project_id_counter += 1
+    db.add(new_project)
+    db.commit()
+    db.refresh(new_project)
 
     return {
         "message": "Project created successfully",
@@ -210,7 +261,10 @@ def create_project(project: ProjectCreate):
 
 # GET ALL PROJECTS
 @app.get("/projects")
-def get_projects():
+def get_projects(db: Session = Depends(get_db)):
+
+    projects = db.query(models.Project).all()
+
     return {
         "message": "Projects retrieved successfully",
         "projects": projects
@@ -219,78 +273,91 @@ def get_projects():
 
 # GET PROJECT BY ID
 @app.get("/projects/{project_id}")
-def get_project(project_id: int):
+def get_project(
+    project_id: int,
+    db: Session = Depends(get_db)
+):
 
-    for project in projects:
-        if project["id"] == project_id:
-            return {
-                "message": "Project retrieved successfully",
-                "project": project
-            }
+    project = db.query(models.Project).filter(
+        models.Project.id == project_id
+    ).first()
 
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Project not found"
-    )
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found"
+        )
+
+    return {
+        "message": "Project retrieved successfully",
+        "project": project
+    }
 
 
 # UPDATE PROJECT
 @app.put("/projects/{project_id}")
 def update_project(
     project_id: int,
-    project: ProjectUpdate
+    project: ProjectUpdate,
+    db: Session = Depends(get_db)
 ):
 
-    # Check if user exists
-    user_exists = False
+    existing_project = db.query(models.Project).filter(
+        models.Project.id == project_id
+    ).first()
 
-    for user in users:
-        if user["id"] == project.user_id:
-            user_exists = True
-            break
+    if not existing_project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found"
+        )
 
-    if not user_exists:
+    user = db.query(models.User).filter(
+        models.User.id == project.user_id
+    ).first()
+
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
 
-    for existing_project in projects:
-        if existing_project["id"] == project_id:
+    existing_project.name = project.name
+    existing_project.description = project.description
+    existing_project.user_id = project.user_id
 
-            existing_project["name"] = project.name
-            existing_project["description"] = project.description
-            existing_project["user_id"] = project.user_id
+    db.commit()
+    db.refresh(existing_project)
 
-            return {
-                "message": "Project updated successfully",
-                "project": existing_project
-            }
-
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Project not found"
-    )
+    return {
+        "message": "Project updated successfully",
+        "project": existing_project
+    }
 
 
 # DELETE PROJECT
 @app.delete("/projects/{project_id}")
-def delete_project(project_id: int):
+def delete_project(
+    project_id: int,
+    db: Session = Depends(get_db)
+):
 
-    for project in projects:
-        if project["id"] == project_id:
+    project = db.query(models.Project).filter(
+        models.Project.id == project_id
+    ).first()
 
-            projects.remove(project)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found"
+        )
 
-            return {
-                "message": "Project deleted successfully",
-                "project": project
-            }
+    db.delete(project)
+    db.commit()
 
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Project not found"
-    )
+    return {
+        "message": "Project deleted successfully"
+    }
 
 
 # =========================================================
@@ -299,33 +366,31 @@ def delete_project(project_id: int):
 
 # CREATE TASK
 @app.post("/tasks", status_code=status.HTTP_201_CREATED)
-def create_task(task: TaskCreate):
-    global task_id_counter
+def create_task(
+    task: TaskCreate,
+    db: Session = Depends(get_db)
+):
 
-    # Check if project exists
-    project_exists = False
+    project = db.query(models.Project).filter(
+        models.Project.id == task.project_id
+    ).first()
 
-    for project in projects:
-        if project["id"] == task.project_id:
-            project_exists = True
-            break
-
-    if not project_exists:
+    if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found"
         )
 
-    new_task = {
-        "id": task_id_counter,
-        "title": task.title,
-        "description": task.description,
-        "status": task.status,
-        "project_id": task.project_id
-    }
+    new_task = models.Task(
+        title=task.title,
+        description=task.description,
+        status=task.status,
+        project_id=task.project_id
+    )
 
-    tasks.append(new_task)
-    task_id_counter += 1
+    db.add(new_task)
+    db.commit()
+    db.refresh(new_task)
 
     return {
         "message": "Task created successfully",
@@ -335,7 +400,10 @@ def create_task(task: TaskCreate):
 
 # GET ALL TASKS
 @app.get("/tasks")
-def get_tasks():
+def get_tasks(db: Session = Depends(get_db)):
+
+    tasks = db.query(models.Task).all()
+
     return {
         "message": "Tasks retrieved successfully",
         "tasks": tasks
@@ -344,76 +412,89 @@ def get_tasks():
 
 # GET TASK BY ID
 @app.get("/tasks/{task_id}")
-def get_task(task_id: int):
+def get_task(
+    task_id: int,
+    db: Session = Depends(get_db)
+):
 
-    for task in tasks:
-        if task["id"] == task_id:
-            return {
-                "message": "Task retrieved successfully",
-                "task": task
-            }
+    task = db.query(models.Task).filter(
+        models.Task.id == task_id
+    ).first()
 
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Task not found"
-    )
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found"
+        )
+
+    return {
+        "message": "Task retrieved successfully",
+        "task": task
+    }
 
 
 # UPDATE TASK
 @app.put("/tasks/{task_id}")
 def update_task(
     task_id: int,
-    task: TaskUpdate
+    task: TaskUpdate,
+    db: Session = Depends(get_db)
 ):
 
-    # Check if project exists
-    project_exists = False
+    existing_task = db.query(models.Task).filter(
+        models.Task.id == task_id
+    ).first()
 
-    for project in projects:
-        if project["id"] == task.project_id:
-            project_exists = True
-            break
+    if not existing_task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found"
+        )
 
-    if not project_exists:
+    project = db.query(models.Project).filter(
+        models.Project.id == task.project_id
+    ).first()
+
+    if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found"
         )
 
-    for existing_task in tasks:
-        if existing_task["id"] == task_id:
+    existing_task.title = task.title
+    existing_task.description = task.description
+    existing_task.status = task.status
+    existing_task.project_id = task.project_id
 
-            existing_task["title"] = task.title
-            existing_task["description"] = task.description
-            existing_task["status"] = task.status
-            existing_task["project_id"] = task.project_id
+    db.commit()
+    db.refresh(existing_task)
 
-            return {
-                "message": "Task updated successfully",
-                "task": existing_task
-            }
-
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Task not found"
-    )
+    return {
+        "message": "Task updated successfully",
+        "task": existing_task
+    }
 
 
 # DELETE TASK
 @app.delete("/tasks/{task_id}")
-def delete_task(task_id: int):
+def delete_task(
+    task_id: int,
+    db: Session = Depends(get_db)
+):
 
-    for task in tasks:
-        if task["id"] == task_id:
+    task = db.query(models.Task).filter(
+        models.Task.id == task_id
+    ).first()
 
-            tasks.remove(task)
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found"
+        )
 
-            return {
-                "message": "Task deleted successfully",
-                "task": task
-            }
+    db.delete(task)
+    db.commit()
 
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Task not found"
-    )
+    return {
+        "message": "Task deleted successfully"
+    }
